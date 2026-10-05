@@ -27,20 +27,16 @@ This fork exists because upstream (v0.85.1 era) broke on Pi 1.x:
 
 ## Install
 
-Install once, globally (all projects, all devices):
+The repo is a proper Pi package (explicit `pi` manifest + host `peerDependencies`), so any of these work:
 
 ```bash
 pi install git:github.com/priaculun/self-compact
+pi install https://github.com/priaculun/self-compact   # URLs are treated as git sources
 ```
 
-Or from a local clone:
+Updates flow through `pi update --extensions` — no more manual file copying, and a Pi upgrade cannot silently disable it (unlike a hand-added `settings.json` entry).
 
-```bash
-git clone https://github.com/priaculun/self-compact.git
-pi install ./self-compact
-```
-
-Then restart Pi (or `/reload`). Verify with `/self-compact-info` — you should see the resolved thresholds and the prompt files.
+Then restart Pi (or `/reload`). Verify with `/self-compact-info` — you should see the resolved thresholds (soft 10% / warning 15% / forced 25%) and the prompt files. The three editable prompt files resolve from the package itself (`.pi/self-compact/` ships in the repo); drop files in `<cwd>/.pi/self-compact/` to override per project.
 
 ### Manual install (no package manager)
 
@@ -57,6 +53,8 @@ Then enable it in `~/.pi/agent/settings.json`:
   "extensions": ["+extensions/self-compact/extensions/self-compact/index.ts"]
 }
 ```
+
+Note: a manual `settings.json` entry can get silently flipped to `-` (disabled) when a Pi update reconciles extensions — one of the bugs that motivated this fork's packaging.
 
 ## Configuration
 

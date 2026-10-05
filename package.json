@@ -1,0 +1,18 @@
+{
+  "name": "self-compact",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Self-compacting Pi coding-agent extension (Pi 1.x compatible fork): self_compact(note_to_self), three context thresholds, one-line footer with the context bar, editable prompt files, HIL commands.",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions/self-compact/index.ts"]
+  }
+}
