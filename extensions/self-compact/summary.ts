@@ -142,10 +142,12 @@ export async function generateSummary(event: SessionBeforeCompactEvent, ctx: Ext
 			truncatedInput ||= truncated;
 			if (replaced === 0) onNotice?.("self-compact: summary request shape not recognized; kept Pi's default summary instructions for this request (compaction continues).");
 			if (unrecognized > 0) onNotice?.(`self-compact: skipped ${unrecognized} unrecognized user text block${unrecognized === 1 ? "" : "s"} while replacing summary instructions (another extension likely rewrote them); compaction continues.`);
-			const response = await ctx.modelRegistry.complete(model, { ...context, systemPrompt: system.text, messages }, {
+			// Use streamSimple rather than complete: Pi routes virtual models (for example
+			// ontoken/auto) on this path before dispatching to their physical model.
+			const response = await ctx.modelRegistry.streamSimple(model, { ...context, systemPrompt: system.text, messages }, {
 				...options, maxTokens, signal: event.signal, cacheRetention: "none", sessionId: randomUUID(),
 				...(model.api === "openai-completions" && model.reasoning ? { reasoningEffort: "low" as const } : {}),
-			});
+			}).result();
 			if (event.signal.aborted || response.stopReason === "aborted") throw new Error("Compaction summary cancelled.");
 			if (response.stopReason !== "error" && !response.content.some(block => block.type === "text" && block.text.trim())) throw new Error("Summary response was empty.");
 			const stream = createAssistantMessageEventStream();
