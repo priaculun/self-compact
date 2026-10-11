@@ -919,6 +919,20 @@ export default function selfCompact(pi: ExtensionAPI) {
 			refreshUi(ctx);
 			return;
 		}
+		const piNothingToCompact = R.lastCompactionError === undefined && /nothing to compact/i.test(event.errorMessage ?? "");
+		if (piNothingToCompact) {
+			// Pi itself reports no compactable material (e.g. the session fits inside
+			// keepRecentTokens while cached usage still reads high). Retrying is futile
+			// and holding the forced lock would brick the session forever, so release
+			// the lock and return the saved note instead of failing.
+			R.state.handoff = { ...h, status: "ready", error: undefined };
+			setLocked(false);
+			save();
+			refreshUi(ctx);
+			notify(ctx, `self-compact: Pi reports nothing to compact; tools restored and the saved note (${h.note.length} chars) is returned below.`, "warning");
+			deliverHandoff(ctx);
+			return;
+		}
 		const ours = R.lastCompactionError !== undefined;
 		R.state.handoff = { ...h, status: "failed", attempts: h.attempts + 1, error: R.lastCompactionError ?? event.errorMessage ?? (event.aborted ? "compaction was cancelled" : "compaction failed") };
 		setLocked(true);
