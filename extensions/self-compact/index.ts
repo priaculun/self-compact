@@ -17,6 +17,8 @@
  *   returned verbatim as a handoff message (shown in full) that starts the next turn. When Pi would find nothing to
  *   compact (the session fits inside keepRecentTokens) the tool refuses instead of saving a note and locking.
  * - Failure or cancellation keeps the note and the lock; retries, /self-compact-now, reload and /tree recovery.
+ * - With a task extension (TaskList/TaskUpdate active): compaction requests ask to update the task list and name
+ *   task IDs in the note; the first call after a handoff asks to check TaskList before the NEXT ACTION.
  * - One-line replacement footer: model label on the left (virtual models: `auto → role · model · thinking`),
  *   the 20-cell context bar and phase on the right.
  *
@@ -28,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { generateSummary, hasCompactionMaterial, keepRecentTokens } from "./summary.ts";
 import { modelLabel } from "./model-label.ts";
+import { awaitingResume, TASK_RESUME_HINT, taskToolsActive, withTaskHint } from "./task-hints.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -357,8 +360,24 @@ export default function selfCompact(pi: ExtensionAPI) {
 	/** The guidance message for a level, rendered from the prompt files with current usage. */
 	function renderGuidance(level: UsageLevel): string {
 		if (level === "notice") return renderTemplate(loadPromptFile("soft", R.searchDirs).text, templateValues());
-		if (level === "forced") return renderTemplate(FORCED_PROMPT, templateValues());
-		return renderTemplate(loadPromptFile("warning", R.searchDirs).text, templateValues());
+		if (level === "forced") return withTaskHint(renderTemplate(FORCED_PROMPT, templateValues()), "forced", activeTools());
+		return withTaskHint(renderTemplate(loadPromptFile("warning", R.searchDirs).text, templateValues()), "pre-compact", activeTools());
+	}
+
+	/** Active tool names; task hints are added only when a task extension's tools are active. */
+	function activeTools(): string[] {
+		try {
+			return pi.getActiveTools();
+		} catch {
+			return [];
+		}
+	}
+
+	/** "Compact now" request with the task hint matching the lock state (locked: task tools are blocked). */
+	function compactNowText(saved?: string): string {
+		// A saved note must be passed verbatim: asking for task updates then would invite a rewrite.
+		if (saved) return nowPrompt(saved);
+		return withTaskHint(nowPrompt(), locked() ? "forced" : "pre-compact", activeTools());
 	}
 
 	/** One transient guidance message is rebuilt from current usage for every LLM call. */
@@ -623,7 +642,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 				return;
 			}
 			const saved = h && (h.status === "pending" || h.status === "failed") ? h.note : undefined;
-			const text = nowPrompt(saved);
+			const text = compactNowText(saved);
 			// A custom message, not a user message: virtual-model routers (e.g. ontoken/auto)
 			// route it as a continuation, so the in-flight model and its prompt cache are kept.
 			if (ctx.isIdle()) {
@@ -814,6 +833,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 		try {
 			const text = guidanceText(ctx);
 			if (text) messages.push(guidanceMessage(text));
+			// First call after a handoff: have the agent look at its task list before the NEXT ACTION.
+			else if (awaitingResume(messages, HANDOFF_TYPE) && taskToolsActive(activeTools())) messages.push(guidanceMessage(TASK_RESUME_HINT));
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			if (!R.promptErrors.has(message)) {
@@ -889,7 +910,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (inert() || activeHandoff() || R.idleRequestEpoch === R.epoch) return;
 		if (!locked() && R.level !== "warning" && R.level !== "forced") return;
 		R.idleRequestEpoch = R.epoch;
-		pi.sendMessage({ customType: GUIDANCE_TYPE, content: nowPrompt(), display: false }, { triggerTurn: true, deliverAs: "followUp" });
+		pi.sendMessage({ customType: GUIDANCE_TYPE, content: compactNowText(), display: false }, { triggerTurn: true, deliverAs: "followUp" });
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {

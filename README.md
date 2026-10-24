@@ -17,6 +17,15 @@ Pi's built-in compaction is reactive: it fires near the context limit with a gen
 
 The footer shows the model on the left — for a virtual model (e.g. `ontoken/auto`) the latest route as `auto → role · model · thinking`, for a reasoning model `model · thinking` — and a 20-cell context bar (`#` cached, `=` not cached, `-` free; `~` soft, `!` warning, `|` hard cutoff) with a phase tag. `view_context` gives the agent the same numbers as JSON. If compaction fails, the note and the lock survive and it retries automatically; `/self-compact-now` or `/compact` finish the job manually.
 
+## With a task extension
+
+When task tools are active (`TaskList` + `TaskUpdate`, e.g. [@tintinweb/pi-tasks](https://github.com/tintinweb/pi-tasks)), self-compact links the task list to the compaction cycle. Everyday task reminders stay with the task extension; self-compact only covers the boundary it cannot see:
+
+- **Before compacting** (warning, `/self-compact-now`, idle "compact now"): update task statuses, create tasks for untracked remaining steps, list open task IDs in the note, and reference the task ID in NEXT ACTION. Under the hard cutoff (other tools blocked) the note carries the statuses instead.
+- **After the handoff**: the first call gets a one-line transient hint to run `TaskList` once before the NEXT ACTION.
+
+Without task tools nothing changes. Hints are transient (never persisted) and a retry with a saved note stays verbatim.
+
 ## Changes from upstream
 
 This fork exists because upstream (v0.85.1 era) broke on Pi 1.x:
