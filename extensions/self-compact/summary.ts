@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
+	buildSessionProjection,
 	compact,
 	convertToLlm,
-	findCutPoint,
+	estimateTokens,
 	serializeConversation,
 	sessionEntryToContextMessages,
 	SettingsManager,
-	type CompactionEntry,
 	type ExtensionContext,
 	type SessionBeforeCompactEvent,
 	type SessionEntry,
@@ -14,42 +14,63 @@ import {
 import { createAssistantMessageEventStream, type Context } from "@earendil-works/pi-ai";
 import type { LoadedPrompt } from "./prompts.ts";
 
+/** Roles Pi 1.4 may cut before (mirrors isCutPointMessage in core/compaction). Tool results never start a kept range. */
+const CUT_POINT_ROLES = new Set(["user", "assistant", "bashExecution", "custom", "branchSummary", "compactionSummary"]);
+
 /**
- * Mirrors Pi's prepareCompaction(): true when a compaction of this branch would have at least one message to
- * summarize, false when Pi would fail with "Nothing to compact" (everything fits inside keepRecentTokens, or the
- * last entry is already a compaction).
+ * Mirrors Pi 1.4's prepareCompaction() on the canonical session projection (context edits and omitted recovery
+ * attempts applied): true when a compaction of this branch would have at least one message to summarize, false
+ * when Pi would answer "Nothing to compact" (everything fits inside keepRecentTokens, or the last entry is already a
+ * compaction). Both the history range and a split-turn prefix lie before the cut, so one range check covers both.
  */
 export function hasCompactionMaterial(entries: SessionEntry[], keepRecentTokens: number): boolean {
 	if (entries.length === 0 || entries[entries.length - 1]!.type === "compaction") return false;
-	let previous = -1;
-	for (let i = entries.length - 1; i >= 0; i--) {
-		if (entries[i]!.type === "compaction") {
-			previous = i;
+	const projected = buildSessionProjection(entries).entries;
+	const prev = projected.findIndex((e) => e.sourceEntry.type === "compaction" && e.messages.length > 0);
+	const start = prev >= 0 ? prev + 1 : 0;
+	const cutPoints: number[] = [];
+	for (let i = start; i < projected.length; i++) {
+		const e = projected[i]!;
+		if (e.sourceEntry.type !== "compaction" && e.messages.some((m) => CUT_POINT_ROLES.has(m.role))) cutPoints.push(i);
+	}
+	if (cutPoints.length === 0) return false;
+	let cut = cutPoints[0]!;
+	let accumulated = 0;
+	let exceeded = false;
+	for (let i = projected.length - 1; i >= start; i--) {
+		accumulated += projected[i]!.messages.reduce((sum, m) => sum + estimateTokens(m), 0);
+		if (accumulated >= keepRecentTokens) {
+			exceeded = true;
+			cut = cutPoints.find((c) => c >= i) ?? cutPoints[cutPoints.length - 1]!;
 			break;
 		}
 	}
-	let boundaryStart = 0;
-	if (previous >= 0) {
-		const firstKept = entries.findIndex((entry) => entry.id === (entries[previous] as CompactionEntry).firstKeptEntryId);
-		boundaryStart = firstKept >= 0 ? firstKept : previous + 1;
+	// Pi 1.4: a closed suffix of omitted recovery attempts (and their context edits) advances the cut by one.
+	const suffix = projected.slice(cut + 1);
+	const visible = (e: (typeof projected)[number]) => e.sourceEntry.type !== "context_edit" && sessionEntryToContextMessages(e.sourceEntry).length > 0;
+	const omitted = (e: (typeof projected)[number]) => visible(e) && e.messages.length === 0;
+	const omittedIds = new Set(suffix.filter(omitted).map((e) => e.sourceEntry.id));
+	const externalReplacement = suffix.some((e) => e.sourceEntry.type === "context_edit" && e.sourceEntry.replacement !== null && !omittedIds.has(e.sourceEntry.targetId));
+	if (
+		exceeded && !externalReplacement &&
+		suffix.some((e) => e.sourceEntry.type === "message" && e.sourceEntry.message.role === "assistant" && omitted(e)) &&
+		suffix.every((e) => e.sourceEntry.type !== "compaction" && (!visible(e) || omitted(e)))
+	) cut++;
+	while (cut > start) {
+		const previous = projected[cut - 1]!;
+		if (previous.sourceEntry.type === "compaction" || previous.messages.length > 0) break;
+		cut--;
 	}
-	const cut = findCutPoint(entries, boundaryStart, entries.length, keepRecentTokens);
-	const historyEnd = cut.isSplitTurn ? cut.turnStartIndex : cut.firstKeptEntryIndex;
-	for (let i = boundaryStart; i < historyEnd; i++) {
-		const entry = entries[i]!;
-		if (entry.type !== "compaction" && sessionEntryToContextMessages(entry).length > 0) return true;
-	}
-	if (cut.isSplitTurn) {
-		for (let i = cut.turnStartIndex; i < cut.firstKeptEntryIndex; i++) {
-			if (sessionEntryToContextMessages(entries[i]!).length > 0) return true;
-		}
+	for (let i = start; i < cut; i++) {
+		const e = projected[i]!;
+		if (e.sourceEntry.type !== "compaction" && e.messages.some((m) => m.role !== "system")) return true;
 	}
 	return false;
 }
 
-/** Pi's retained recent history for this working directory (global settings merged with the project's). */
-export function keepRecentTokens(cwd: string): number {
-	return SettingsManager.create(cwd).getCompactionKeepRecentTokens();
+/** Pi's retained recent history for this working directory and model (global settings merged with the project's). */
+export function keepRecentTokens(cwd: string, model?: { provider: string; id: string }): number {
+	return SettingsManager.create(cwd).getCompactionKeepRecentTokens(model);
 }
 
 function historyInput(messages: SessionBeforeCompactEvent["preparation"]["messagesToSummarize"], previous?: string): string {
@@ -63,10 +84,14 @@ function turnPrefixInput(messages: SessionBeforeCompactEvent["preparation"]["mes
 	return `# Conversation\n${conversation}\n\n# Instructions\n`;
 }
 
-function summaryInstructions(event: SessionBeforeCompactEvent, prompt: LoadedPrompt): string {
+function summaryInstructions(event: SessionBeforeCompactEvent, prompt: LoadedPrompt, note?: string): string {
 	return [
 		"Summarize the supplied historical data. Do not continue the task, simulate tools, or claim actions without tool-result evidence. Keep pending actions pending.",
 		prompt.text,
+		"Do not output <read-files> or <modified-files> lists: Pi appends them to your summary automatically.",
+		note
+			? `The agent's own note_to_self is delivered verbatim right after your summary. Everything it states is already preserved: do not repeat it. Record only what the note omits (constraints, decisions and rationale, exact errors, paths, values); keep sections that the note fully covers to one line or "(see note)".\n<note-to-self>\n${note}\n</note-to-self>`
+			: "",
 		event.preparation.isSplitTurn ? "This is a split turn. Summarize only the supplied history or turn prefix; the recent suffix remains available." : "",
 		event.customInstructions ? `Additional summarization instructions from the operator: ${event.customInstructions}` : "",
 	].filter(Boolean).join("\n\n");
@@ -124,19 +149,21 @@ function replaceInstructions(context: Context, inputs: string[], instructions: s
 }
 
 /** Pi owns split turns, summary updates, file tracking and configured transport retries. */
-export async function generateSummary(event: SessionBeforeCompactEvent, ctx: ExtensionContext, system: LoadedPrompt, instructions: LoadedPrompt, onNotice?: (message: string) => void) {
+export async function generateSummary(event: SessionBeforeCompactEvent, ctx: ExtensionContext, system: LoadedPrompt, instructions: LoadedPrompt, onNotice?: (message: string) => void, note?: string) {
 	if (!ctx.model) throw new Error("No model available for compaction.");
 	const inputs = [
 		historyInput(event.preparation.messagesToSummarize, event.preparation.previousSummary),
 		turnPrefixInput(event.preparation.turnPrefixMessages),
 		historyInput(event.preparation.turnPrefixMessages), // legacy <conversation> wrapper used by older Pi builds
 	].sort((a, b) => b.length - a.length);
-	const userInstructions = summaryInstructions(event, instructions);
+	const userInstructions = summaryInstructions(event, instructions, note);
 	let truncatedInput = false;
 	const result = await compact(
 		event.preparation, ctx.model, undefined, undefined, event.customInstructions, event.signal, ctx.thinkingLevel,
 		async (model, context, options) => {
-			const maxTokens = Math.min(options?.maxTokens ?? 8192, model.maxTokens || 8192, 8192);
+			// Pi 1.4 dropped the fixed summary output cap (#9512): reasoning models hit it and failed with
+			// "generation hit the token cap". Use the model's output limit like Pi does.
+			const maxTokens = options?.maxTokens ?? (model.maxTokens || 32_000);
 			const budgetChars = Math.max(8000, (model.contextWindow - maxTokens - 2000) * 4 - system.text.length - userInstructions.length);
 			const { messages, truncated, unrecognized, replaced } = replaceInstructions(context, inputs, userInstructions, budgetChars);
 			truncatedInput ||= truncated;
@@ -146,7 +173,8 @@ export async function generateSummary(event: SessionBeforeCompactEvent, ctx: Ext
 			// ontoken/auto) on this path before dispatching to their physical model.
 			const response = await ctx.modelRegistry.streamSimple(model, { ...context, systemPrompt: system.text, messages }, {
 				...options, maxTokens, signal: event.signal, cacheRetention: "none", sessionId: randomUUID(),
-				...(model.api === "openai-completions" && model.reasoning ? { reasoningEffort: "low" as const } : {}),
+				// Summaries need little reasoning; the session's thinking level would only burn output tokens.
+				...(model.reasoning && options?.reasoning ? { reasoning: "low" as const } : {}),
 			}).result();
 			if (event.signal.aborted || response.stopReason === "aborted") throw new Error("Compaction summary cancelled.");
 			if (response.stopReason !== "error" && !response.content.some(block => block.type === "text" && block.text.trim())) throw new Error("Summary response was empty.");

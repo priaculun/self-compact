@@ -32,6 +32,7 @@ import { Type } from "typebox";
 import { formatPct, formatTokens, renderContextBar } from "./context-bar.ts";
 import {
 	FORCED_PROMPT,
+	WARNING_REMINDER,
 	BUILTIN_PROMPTS,
 	loadPromptFile,
 	NOTE_MAX_CHARS,
@@ -107,6 +108,11 @@ interface Runtime {
 	alive: boolean;
 	idleRequestEpoch: number;
 	promptErrors: Set<string>;
+	/** Epoch in which the full notice / warning text was last injected; later calls in the same epoch get less or nothing. */
+	noticeEpoch: number;
+	warningEpoch: number;
+	/** Memo for compactable(): the projection walk is O(branch) and runs on every tool call and LLM call. */
+	compactableMemo?: { key: string; value: boolean };
 }
 
 function nowPrompt(saved?: string): string {
@@ -160,6 +166,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 		alive: true,
 		idleRequestEpoch: -1,
 		promptErrors: new Set(),
+		noticeEpoch: -1,
+		warningEpoch: -1,
 	};
 
 	const flag = (name: string): string | undefined => {
@@ -312,7 +320,13 @@ export default function selfCompact(pi: ExtensionAPI) {
 	 * Locking tools or asking for a note would then strand the agent, so the extension stays quiet instead.
 	 */
 	function compactable(ctx: ExtensionContext): boolean {
-		return hasCompactionMaterial(ctx.sessionManager.getBranch(), keepRecentTokens(ctx.cwd));
+		const branch = ctx.sessionManager.getBranch();
+		const model = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+		const key = `${R.epoch}:${branch.length}:${branch[branch.length - 1]?.id ?? ""}:${model?.provider}/${model?.id}`;
+		if (R.compactableMemo?.key === key) return R.compactableMemo.value;
+		const value = hasCompactionMaterial(branch, keepRecentTokens(ctx.cwd, model));
+		R.compactableMemo = { key, value };
+		return value;
 	}
 
 	/** Called whenever usage may have changed: records crossings (TUI-only line) and engages the forced lock. */
@@ -349,6 +363,17 @@ export default function selfCompact(pi: ExtensionAPI) {
 		const level = locked() ? "forced" : R.level;
 		if (level === "unknown" || level === "idle") return undefined;
 		if (!compactable(ctx)) return undefined;
+		// Every injected token is re-sent (and, with full-price cache billing, re-paid) on every call. The notice asks
+		// for nothing, so it is injected once per crossing; the warning is injected in full once, then as a one-liner.
+		if (level === "notice") {
+			if (R.noticeEpoch === R.epoch) return undefined;
+			R.noticeEpoch = R.epoch;
+			return renderGuidance(level);
+		}
+		if (level === "warning") {
+			if (R.warningEpoch === R.epoch) return renderTemplate(WARNING_REMINDER, templateValues());
+			R.warningEpoch = R.epoch;
+		}
 		return renderGuidance(level);
 	}
 
@@ -493,7 +518,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const view = contextView(ctx);
 			refreshUi(ctx);
-			return { content: [{ type: "text", text: JSON.stringify(view, null, 2) }], details: view };
+			return { content: [{ type: "text", text: JSON.stringify(view) }], details: view };
 		},
 		renderCall(_args, theme) {
 			return new Text(theme.fg("toolTitle", theme.bold(VIEW_TOOL_NAME)), 0, 0);
@@ -530,7 +555,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			if (existing && (existing.status === "compacting" || existing.status === "ready")) throw new Error("Compaction is already in progress for the saved note.");
 			if (!compactable(ctx)) {
 				R.usage = snapshotUsage(ctx);
-				const keep = keepRecentTokens(ctx.cwd);
+				const keep = keepRecentTokens(ctx.cwd, ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined);
 				throw new Error(`Nothing to compact yet: Pi keeps the newest ${keep.toLocaleString("en-US")} tokens of messages untouched and this session does not reach past them (context ${R.usage.tokens?.toLocaleString("en-US") ?? "?"} tokens, ${formatPct(R.usage.percent, 1)}). No note was saved and no tool is blocked. Keep working and call ${TOOL_NAME} later.`);
 			}
 			if (existing && existing.note.trim() !== raw.trim()) {
@@ -844,7 +869,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		if (event.reason !== "manual") {
+		// Threshold auto-compaction is deferred to our idle handoff. Overflow recovery is not: the request already
+		// failed, so locking would only repeat the overflow. Let it compact with our summary prompt instead.
+		if (event.reason === "threshold") {
 			setLocked(true);
 			save();
 			refreshUi(ctx);
@@ -868,7 +895,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			if (signal.aborted) return { cancel: true };
 			try {
 				const instructions = loadPromptFile("summaryInstructions", R.searchDirs);
-				const { result, truncatedInput } = await generateSummary(event, ctx, prompt, instructions, (message) => notify(ctx, message, "warning"));
+				const { result, truncatedInput } = await generateSummary(event, ctx, prompt, instructions, (message) => notify(ctx, message, "warning"), h?.note);
 				return {
 					compaction: {
 						...result,

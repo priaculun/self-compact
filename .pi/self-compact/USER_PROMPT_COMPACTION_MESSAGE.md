@@ -25,12 +25,6 @@ You receive the conversation as plain historical text (and, after the first comp
 ## Critical Context
 - [Exact paths, function names, commands, values, and outputs needed to continue]
 
-<read-files>
-[one path per line]
-</read-files>
-
-<modified-files>
-[one path per line]
-</modified-files>
+Do not output <read-files> or <modified-files> lists: Pi appends them to the summary automatically.
 
 Rules: never invent completed work; mark verified results as verified and everything else as unverified; preserve exact paths, commands, and error messages; keep every section concise; when a previous summary is provided, merge it and move finished items to Done.

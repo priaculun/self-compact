@@ -20,7 +20,7 @@ export type PromptKind = keyof typeof PROMPT_FILES;
 
 export const PROMPT_SUBDIR = join(".pi", "self-compact");
 
-export const NOTE_MAX_CHARS = 24_000;
+export const NOTE_MAX_CHARS = 12_000;
 
 export const TEMPLATE_KEYS = [
 	"used_tokens",
@@ -56,11 +56,14 @@ Output only this structure:
 ## Key Decisions
 ## Next Steps
 ## Critical Context
-<read-files>...</read-files>
-<modified-files>...</modified-files>
+
+Do not output <read-files> or <modified-files>: Pi appends them automatically.
 
 Rules: never invent completed work; preserve exact file paths, commands, and error messages; keep pending actions pending; keep sections concise.`,
 };
+
+/** Re-sent on every LLM call after the full warning was injected once in this epoch: short on purpose. */
+export const WARNING_REMINDER = `[self-compact · WARNING] {{used_tokens}} tokens ({{used_percent}}); hard cutoff {{forced_tokens}}. Finish the current step, then call \`self_compact\` with your note_to_self.`;
 
 export const FORCED_PROMPT = `[self-compact · FORCED] Context usage is {{used_tokens}} tokens ({{used_percent}}), at the hard cutoff of {{forced_tokens}} ({{forced_percent}}). Every tool except \`self_compact\` is blocked until compaction succeeds. Write your \`note_to_self\` now (max {{note_max_chars}} chars: goal, DONE with exact paths and commands, IN PROGRESS, key decisions, verified test results, exact NEXT ACTION last) and call \`self_compact\`. Do not call any other tool.`;
 

@@ -23,7 +23,9 @@ This fork exists because upstream (v0.85.1 era) broke on Pi 1.x:
 
 1. **Pi 1.x split-turn compaction fix** (`summary.ts`) — Pi 1.x wraps the turn-prefix summarization request as `# Conversation\n...\n\n# Instructions\n` instead of `<conversation>...</conversation>`. Upstream's instruction-replacement matcher recognized neither shape in that path and aborted with `Unrecognized Pi summary input; cannot replace instructions safely.` — bricking any session whose cut point fell mid-turn. This fork matches both the `<conversation>` (main history) and `# Conversation` (turn prefix) shapes.
 2. **Fail-soft instruction replacement** (`summary.ts`) — if a summary request shape is ever unrecognized again, the extension keeps Pi's default instructions for that request and notifies, instead of throwing. Compaction always completes; the session can no longer get locked with a kept note.
-3. **Tuned defaults** (`defaults.ts`) — notice 10%, warning 15%, buffer 10% (forced cutoff at 25%). Tuned for 1M-context models where the provider bills cached tokens at full price: request size stays small (~104k tokens average) without losing context, since the handoff note carries the work state verbatim.
+3. **Tuned defaults** (`defaults.ts`) — notice 100k, warning 150k, buffer 100k (forced cutoff at 250k tokens). Absolute token counts so the lines stay put when a router (e.g. `ontoken/auto`) switches between models with different windows. Tuned for providers that bill cached tokens at full price: request size stays small without losing context, since the handoff note carries the work state verbatim.
+4. **Pi 1.4 compatibility** (`summary.ts`) — no fixed 8192-token summary output cap (Pi 1.4 removed it, #9512: reasoning models failed with "generation hit the token cap"); summaries use the model's output limit with low reasoning. The "nothing to compact" check mirrors Pi 1.4's `prepareCompaction` on the canonical session projection (context edits, omitted recovery attempts); verified 0 mismatches against Pi over 972 real-session cases. `keepRecentTokens` honours per-model settings. Overflow-recovery compaction is no longer cancelled (only threshold auto-compaction is deferred to the handoff).
+5. **Token savings** — the notice is injected once per crossing instead of on every LLM call; the warning is injected in full once, then as a one-line reminder; the summarizer receives the note_to_self and records only what the note omits (no duplicated state); no duplicated `<read-files>`/`<modified-files>` lists (Pi appends them); `note_to_self` capped at 12,000 chars; compact `view_context` JSON; the compactable check is memoized per branch head.
 
 ## Install
 
@@ -36,7 +38,7 @@ pi install https://github.com/priaculun/self-compact   # URLs are treated as git
 
 Updates flow through `pi update --extensions` — no more manual file copying, and a Pi upgrade cannot silently disable it (unlike a hand-added `settings.json` entry).
 
-Then restart Pi (or `/reload`). Verify with `/self-compact-info` — you should see the resolved thresholds (soft 10% / warning 15% / forced 25%) and the prompt files. The three editable prompt files resolve from the package itself (`.pi/self-compact/` ships in the repo); drop files in `<cwd>/.pi/self-compact/` to override per project.
+Then restart Pi (or `/reload`). Verify with `/self-compact-info` — you should see the resolved thresholds (soft 100k / warning 150k / forced 250k) and the prompt files. The three editable prompt files resolve from the package itself (`.pi/self-compact/` ships in the repo); drop files in `<cwd>/.pi/self-compact/` to override per project.
 
 ### Manual install (no package manager)
 
@@ -62,9 +64,9 @@ Defaults live in `extensions/self-compact/defaults.ts`:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--compact-soft-at` | `10%` | soft heads-up, nothing changes |
-| `--compact-at` | `15%` | time to write a note and compact soon |
-| `--compact-buffer` | `10%` | extra allowance above warning before the hard cutoff (so forced = 25%) |
+| `--compact-soft-at` | `100k` | soft heads-up, nothing changes |
+| `--compact-at` | `150k` | time to write a note and compact soon |
+| `--compact-buffer` | `100k` | extra allowance above warning before the hard cutoff (so forced = 250k) |
 
 Each value is a percentage of the active model's context window, or a token count (`270000`, `100k`, `1.5m`). The hard cutoff never exceeds 90% of the window.
 
