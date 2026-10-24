@@ -15,7 +15,7 @@ Pi's built-in compaction is reactive: it fires near the context limit with a gen
 | **forced** | usage crosses warning + buffer (capped at 90%) | every tool call is blocked except `self_compact` |
 | **handoff** | agent calls `self_compact({ note_to_self })` | note saved, run ends, compaction runs once idle, note returned verbatim |
 
-The footer shows a 20-cell context bar (`#` cached, `=` not cached, `-` free; `~` soft, `!` warning, `|` hard cutoff) with a phase tag. `view_context` gives the agent the same numbers as JSON. If compaction fails, the note and the lock survive and it retries automatically; `/self-compact-now` or `/compact` finish the job manually.
+The footer shows the model on the left — for a virtual model (e.g. `ontoken/auto`) the latest route as `auto → role · model · thinking`, for a reasoning model `model · thinking` — and a 20-cell context bar (`#` cached, `=` not cached, `-` free; `~` soft, `!` warning, `|` hard cutoff) with a phase tag. `view_context` gives the agent the same numbers as JSON. If compaction fails, the note and the lock survive and it retries automatically; `/self-compact-now` or `/compact` finish the job manually.
 
 ## Changes from upstream
 

@@ -1,6 +1,6 @@
 {
   "name": "self-compact",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "description": "Self-compacting Pi coding-agent extension (Pi 1.x compatible fork): self_compact(note_to_self), three context thresholds, one-line footer with the context bar, editable prompt files, HIL commands.",
   "type": "module",

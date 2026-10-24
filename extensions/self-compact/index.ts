@@ -17,7 +17,8 @@
  *   returned verbatim as a handoff message (shown in full) that starts the next turn. When Pi would find nothing to
  *   compact (the session fits inside keepRecentTokens) the tool refuses instead of saving a note and locking.
  * - Failure or cancellation keeps the note and the lock; retries, /self-compact-now, reload and /tree recovery.
- * - One-line replacement footer: model id on the left, the 20-cell context bar and phase on the right.
+ * - One-line replacement footer: model label on the left (virtual models: `auto → role · model · thinking`),
+ *   the 20-cell context bar and phase on the right.
  *
  * Merged from the claude-fable-5-1 and gpt-6-astra implementations (see specs/self-compact-merge.html).
  */
@@ -26,6 +27,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { generateSummary, hasCompactionMaterial, keepRecentTokens } from "./summary.ts";
+import { modelLabel } from "./model-label.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -658,6 +660,26 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return new Text([theme.fg("accent", theme.bold(title ?? "self-compact info")), ...rest.map((l) => theme.fg("text", l))].join("\n"), 0, 0);
 	});
 
+	/**
+	 * Model label for the footer, memoised per leaf / model / thinking level so render() never rescans
+	 * the branch while nothing changed. Under a virtual model it shows role, routed model and thinking.
+	 */
+	let labelMemo: { key: string; value: string } | undefined;
+	function footerModelLabel(ctx: ExtensionContext): string {
+		const model = ctx.model;
+		const thinking = pi.getThinkingLevel();
+		const key = `${ctx.sessionManager.getLeafId() ?? ""}|${model?.provider}/${model?.id}|${thinking}`;
+		if (labelMemo?.key === key) return labelMemo.value;
+		let value: string;
+		try {
+			value = modelLabel(model, thinking, ctx.sessionManager.getBranch() as never[]);
+		} catch {
+			value = model?.id ?? "no-model"; // cosmetic: never break the footer
+		}
+		labelMemo = { key, value };
+		return value;
+	}
+
 	function installFooter(ctx: ExtensionContext) {
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setFooter((tui, theme) => {
@@ -690,7 +712,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 						.join("");
 					const problem = inert();
 					const tag = statusTag();
-					const left = theme.fg("dim", ` ${ctx.model?.id ?? "no-model"}`) + (R.state.cycle > 0 ? theme.fg("dim", ` · cycle ${R.state.cycle}`) : "");
+					const left = theme.fg("dim", ` ${footerModelLabel(ctx)}`) + (R.state.cycle > 0 ? theme.fg("dim", ` · cycle ${R.state.cycle}`) : "");
 					const phase = tag ? ` ${theme.fg(problem ? "error" : locked() ? "error" : levelColor(level), tag)}` : "";
 					const right = `${theme.fg("dim", "[")}${cells}${theme.fg("dim", `] ${bar.label}`)}${phase} `;
 					const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
@@ -766,6 +788,14 @@ export default function selfCompact(pi: ExtensionAPI) {
 		R.alive = false;
 		R.epoch += 1;
 		clearTimers();
+	});
+
+	// Routers append their state just before the request: repaint so the footer shows the new route early.
+	pi.on("message_start", async (event) => {
+		if (event.message.role === "assistant") R.requestRender?.();
+	});
+	pi.on("thinking_level_select", async () => {
+		R.requestRender?.();
 	});
 
 	pi.on("model_select", async (_event, ctx) => {
