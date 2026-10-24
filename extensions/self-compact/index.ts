@@ -72,6 +72,8 @@ const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const MAX_AUTO_RETRIES = 3;
 const SUMMARY_ATTEMPTS = 2;
 const GUIDANCE_TYPE = "self-compact-guidance";
+/** `/self-compact-now` request; kept in context (unlike guidance) so the model sees what it was asked. */
+const REQUEST_TYPE = "self-compact-request";
 
 /** Static system-prompt line: never changes between calls so the prompt-cache prefix stays stable. */
 const SYSTEM_PROMPT_LINE = `\n\nself-compact: when context usage crosses a threshold you receive a transient [self-compact · …] message with live numbers. You cannot see your own context usage otherwise: call view_context (no arguments) whenever you need the current numbers as JSON, for example after a compaction or before deciding to compact; do not poll it every turn. After a compaction, your own saved note_to_self is returned to you verbatim as the next message (exactly the note text, nothing else); resume its NEXT ACTION without another user message and never restart work the note marks as done. If no work remains, report completion and stop.`;
@@ -620,11 +622,13 @@ export default function selfCompact(pi: ExtensionAPI) {
 			}
 			const saved = h && (h.status === "pending" || h.status === "failed") ? h.note : undefined;
 			const text = nowPrompt(saved);
+			// A custom message, not a user message: virtual-model routers (e.g. ontoken/auto)
+			// route it as a continuation, so the in-flight model and its prompt cache are kept.
 			if (ctx.isIdle()) {
-				pi.sendUserMessage(text);
+				pi.sendMessage({ customType: REQUEST_TYPE, content: text, display: true }, { triggerTurn: true });
 				notify(ctx, saved ? "self-compact: asked the agent to compact now with its saved note." : "self-compact: asked the agent to write its note and compact now.", "info");
 			} else {
-				pi.sendUserMessage(text, { deliverAs: "steer" });
+				pi.sendMessage({ customType: REQUEST_TYPE, content: text, display: true }, { triggerTurn: true, deliverAs: "steer" });
 				notify(ctx, "self-compact: queued a steering request to compact now.", "info");
 			}
 		},

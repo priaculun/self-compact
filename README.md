@@ -87,4 +87,4 @@ Live values are available as `{{placeholders}}` (e.g. `{{used_tokens}}`, `{{used
 - `self_compact({ note_to_self })` — the agent-facing tool: save the note, end the run, compact, resume with the note verbatim
 - `view_context()` — current usage numbers as JSON
 - `/self-compact-info` — full settings/thresholds/state dump without spending a model turn
-- `/self-compact-now` — force the handoff cycle immediately
+- `/self-compact-now` — force the handoff cycle immediately (sent as a custom message, not a user message, so virtual-model routers such as `ontoken/auto` treat it as a continuation and keep the model and its prompt cache)
